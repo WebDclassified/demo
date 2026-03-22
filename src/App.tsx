@@ -1,87 +1,75 @@
-import {
-  useEffect,
-  useMemo,
-  useState,
-  type ComponentType,
-  type CSSProperties,
-  type FocusEvent,
-  type MouseEvent,
-} from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type FocusEvent, type MouseEvent } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import {
-  BarChart3,
-  BookOpen,
-  Briefcase,
-  ChartNoAxesColumn,
-  Clock3,
-  FileText,
-  House,
-  Lightbulb,
-  List,
-  Mail,
-  MessageCircle,
-  Newspaper,
-  MoonStar,
-  Rocket,
-  Send,
-  Sparkles,
-  Tag,
-  Sun,
-  Target,
-  WandSparkles,
-} from 'lucide-react'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { defaultForm, formats, lengths, moduleContent, navItems, STORAGE_KEY, tones, tools } from './data/workspaceData'
+import { TopNav } from './components/TopNav'
+import { ToolRail } from './components/ToolRail'
+import { generateContentDraft } from './services/contentService'
+import type { DraftPayload, NavItem, WorkspaceForm } from './types/workspace'
 import './App.css'
 
-type Tool = {
-  id: string
-  name: string
-  subtitle: string
-  icon: ComponentType<{ size?: number }>
-}
-
-type NavItem = {
-  id: string
-  label: string
-  icon: ComponentType<{ size?: number }>
-}
-
-const tools: Tool[] = [
-  { id: 'newsletter', name: 'Newsletter', subtitle: 'Email campaigns', icon: Mail },
-  { id: 'blog-post', name: 'Blog Post', subtitle: 'SEO content', icon: FileText },
-  { id: 'linkedin', name: 'LinkedIn', subtitle: 'Professional posts', icon: Briefcase },
-  { id: 'threads', name: 'Threads', subtitle: 'Short-form posts', icon: MessageCircle },
-  { id: 'instagram', name: 'Instagram', subtitle: 'Social content', icon: Sparkles },
-  { id: 'cold-email', name: 'Cold Email', subtitle: 'Sales outreach', icon: Send },
-]
-
-const formats = [
-  { id: 'how-to', label: 'How-To', icon: Lightbulb },
-  { id: 'listicle', label: 'Listicle', icon: List },
-  { id: 'opinion', label: 'Opinion', icon: BookOpen },
-  { id: 'case-study', label: 'Case Study', icon: Briefcase },
-  { id: 'news', label: 'News', icon: Newspaper },
-]
-
-const navItems: NavItem[] = [
-  { id: 'growth', label: 'Growth', icon: House },
-  { id: 'prompt', label: 'Prompt Enhancer', icon: Sparkles },
-  { id: 'pricing', label: 'Pricing', icon: Tag },
-  { id: 'crm', label: 'RealTech CRM', icon: Rocket },
-  { id: 'analytics', label: 'Howdy Analytics', icon: BarChart3 },
-]
+const GrowthPage = lazy(() => import('./pages/GrowthPage'))
+const ModulePage = lazy(() => import('./pages/ModulePage'))
 
 function App() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+
   const [activeNav, setActiveNav] = useState('growth')
   const [activeTool, setActiveTool] = useState('blog-post')
   const [activeFormat, setActiveFormat] = useState('case-study')
+  const [toolQuery, setToolQuery] = useState('')
+  const [form, setForm] = useState<WorkspaceForm>(defaultForm)
+  const [generatedContent, setGeneratedContent] = useState('')
+  const [errorMessage, setErrorMessage] = useState('')
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [savedLabel, setSavedLabel] = useState('Unsaved')
   const [theme, setTheme] = useState<'dark' | 'light'>('dark')
   const [focusMode, setFocusMode] = useState(false)
   const [tilt, setTilt] = useState({ x: 0, y: 0, px: 50, py: 50 })
+  const copyTimeoutRef = useRef<number | null>(null)
 
   const selectedTool = useMemo(
     () => tools.find((tool) => tool.id === activeTool) ?? tools[1],
     [activeTool],
   )
+
+  const filteredTools = useMemo(() => {
+    const query = toolQuery.trim().toLowerCase()
+    if (!query) {
+      return tools
+    }
+
+    return tools.filter(
+      (tool) =>
+        tool.name.toLowerCase().includes(query) || tool.subtitle.toLowerCase().includes(query),
+    )
+  }, [toolQuery])
+
+  const completionPercent = useMemo(() => {
+    const requiredFieldCount = ['businessName', 'industry', 'description', 'keywords'].reduce(
+      (count, key) => {
+        const value = form[key as keyof WorkspaceForm]
+        return value.trim() ? count + 1 : count
+      },
+      0,
+    )
+
+    const setupProgress = (requiredFieldCount / 4) * 60
+    const contentProgress = generatedContent ? 30 : 0
+    const draftProgress = savedLabel !== 'Unsaved' ? 10 : 0
+
+    return Math.min(100, Math.round(setupProgress + contentProgress + draftProgress))
+  }, [form, generatedContent, savedLabel])
+
+  const activeNavFromPath = useMemo(() => {
+    const found = navItems.find((item) => item.path === location.pathname)
+    return found?.id ?? 'growth'
+  }, [location.pathname])
+
+  const selectedNav = navItems.find((item) => item.id === activeNav) ?? navItems[0]
 
   useEffect(() => {
     const savedTheme = localStorage.getItem('growthhub-theme')
@@ -100,8 +88,175 @@ function App() {
     localStorage.setItem('growthhub-theme', theme)
   }, [theme])
 
+  useEffect(() => {
+    setActiveNav(activeNavFromPath)
+  }, [activeNavFromPath])
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY)
+      if (!raw) {
+        return
+      }
+
+      const parsed = JSON.parse(raw) as DraftPayload
+
+      if (parsed.activePath && navItems.some((item) => item.path === parsed.activePath)) {
+        navigate(parsed.activePath, { replace: true })
+      }
+      if (parsed.activeTool && tools.some((tool) => tool.id === parsed.activeTool)) {
+        setActiveTool(parsed.activeTool)
+      }
+      if (parsed.activeFormat && formats.some((item) => item.id === parsed.activeFormat)) {
+        setActiveFormat(parsed.activeFormat)
+      }
+      if (parsed.form) {
+        setForm(parsed.form)
+      }
+      if (parsed.generatedContent) {
+        setGeneratedContent(parsed.generatedContent)
+        setSavedLabel('Draft restored')
+      }
+    } catch {
+      setSavedLabel('Unsaved')
+    }
+  }, [navigate])
+
+  useEffect(() => {
+    const payload: DraftPayload = {
+      activePath: location.pathname,
+      activeTool,
+      activeFormat,
+      form,
+      generatedContent,
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+  }, [location.pathname, activeTool, activeFormat, form, generatedContent])
+
+  useEffect(() => {
+    if (activeNav !== 'growth') {
+      return
+    }
+
+    const toolFromUrl = searchParams.get('tool')
+    if (toolFromUrl && tools.some((tool) => tool.id === toolFromUrl) && toolFromUrl !== activeTool) {
+      setActiveTool(toolFromUrl)
+    }
+  }, [activeNav, activeTool, searchParams])
+
+  useEffect(() => {
+    if (activeNav !== 'growth') {
+      return
+    }
+
+    const currentTool = searchParams.get('tool')
+    if (currentTool === activeTool) {
+      return
+    }
+
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.set('tool', activeTool)
+    setSearchParams(nextParams, { replace: true })
+  }, [activeNav, activeTool, searchParams, setSearchParams])
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) {
+        window.clearTimeout(copyTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  const qualityScore = useMemo(() => {
+    const descriptionScore = Math.min(40, Math.round(form.description.length / 4))
+    const keywordCount = form.keywords
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean).length
+    const keywordScore = Math.min(35, keywordCount * 8)
+    const outputScore = generatedContent ? 25 : 0
+    return Math.min(100, descriptionScore + keywordScore + outputScore)
+  }, [form.description, form.keywords, generatedContent])
+
   const toggleTheme = () => {
     setTheme((current) => (current === 'dark' ? 'light' : 'dark'))
+  }
+
+  const handleFormValue = (field: keyof WorkspaceForm, value: string) => {
+    setForm((current) => ({ ...current, [field]: value }))
+    setSavedLabel('Unsaved')
+  }
+
+  const saveDraft = () => {
+    setSavedLabel(`Saved ${new Date().toLocaleTimeString()}`)
+  }
+
+  const resetWorkflow = () => {
+    setForm(defaultForm)
+    setGeneratedContent('')
+    setErrorMessage('')
+    setSavedLabel('Unsaved')
+  }
+
+  const generateContent = async () => {
+    if (
+      !form.businessName.trim() ||
+      !form.industry.trim() ||
+      !form.description.trim() ||
+      !form.keywords.trim()
+    ) {
+      setErrorMessage('Complete Business Name, Industry, Description, and Keywords before generating.')
+      return
+    }
+
+    setErrorMessage('')
+    setIsGenerating(true)
+
+    try {
+      const formatLabel = formats.find((item) => item.id === activeFormat)?.label ?? 'Article'
+      const result = await generateContentDraft({
+        toolName: selectedTool.name,
+        formatLabel,
+        form,
+      })
+      setGeneratedContent(result.markdown)
+      setSavedLabel('Unsaved')
+    } catch {
+      setErrorMessage('Unable to generate content right now. Please retry in a moment.')
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const copyGeneratedContent = async () => {
+    if (!generatedContent) {
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(generatedContent)
+      setCopied(true)
+      if (copyTimeoutRef.current) {
+        window.clearTimeout(copyTimeoutRef.current)
+      }
+      copyTimeoutRef.current = window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setErrorMessage('Clipboard permission denied. Try copying manually from the preview panel.')
+    }
+  }
+
+  const downloadGeneratedContent = () => {
+    if (!generatedContent) {
+      return
+    }
+
+    const blob = new Blob([generatedContent], { type: 'text/markdown;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `${selectedTool.id}-draft.md`
+    anchor.click()
+    URL.revokeObjectURL(url)
   }
 
   const handleStagePointerMove = (event: MouseEvent<HTMLElement>) => {
@@ -137,217 +292,23 @@ function App() {
     '--spot-y': `${tilt.py.toFixed(2)}%`,
   } as CSSProperties
 
-  const selectedNav = navItems.find((item) => item.id === activeNav) ?? navItems[0]
-
-  const renderModuleStage = () => {
-    if (activeNav === 'growth') {
-      return (
-        <>
-          <header className="stage-header">
-            <div>
-              <p className="eyebrow">AI Content Engine</p>
-              <div className="title-row">
-                <h2>{selectedTool.name} Studio</h2>
-                <span className="live-pill">
-                  <Sparkles size={14} />
-                  Live Optimization
-                </span>
-              </div>
-            </div>
-            <div className="header-actions">
-              <button type="button" className="ghost-btn">
-                Change Tool / Start Over
-              </button>
-            </div>
-          </header>
-
-          <section className="progress-wrap" aria-label="Progress">
-            <p>32% Complete</p>
-            <div className="progress-track">
-              <span />
-            </div>
-            <div className="steps">
-              <div className="step active">
-                <span>1</span>
-                <small>Setup</small>
-              </div>
-              <div className="step active">
-                <span>2</span>
-                <small>Content</small>
-              </div>
-              <div className="step">
-                <span>3</span>
-                <small>Ready</small>
-              </div>
-            </div>
-          </section>
-
-          <section className="kpi-row" aria-label="Performance stats">
-            <article className="kpi-card">
-              <ChartNoAxesColumn size={16} />
-              <div>
-                <strong>+128%</strong>
-                <small>Reach growth</small>
-              </div>
-            </article>
-            <article className="kpi-card">
-              <Clock3 size={16} />
-              <div>
-                <strong>4.3 min</strong>
-                <small>Avg setup time</small>
-              </div>
-            </article>
-            <article className="kpi-card">
-              <Target size={16} />
-              <div>
-                <strong>92%</strong>
-                <small>Audience match</small>
-              </div>
-            </article>
-          </section>
-
-          <motion.section
-            className={`content-card ${focusMode ? 'focus-mode' : ''}`}
-            initial={{ opacity: 0, y: 26 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.45 }}
-            onFocusCapture={() => setFocusMode(true)}
-            onBlurCapture={handleCardBlurCapture}
-          >
-            <div className="card-head">
-              <div>
-                <p className="eyebrow">Step 1 of 3</p>
-                <h3>{selectedTool.name} Setup</h3>
-                <p className="muted">Define audience and choose a content format.</p>
-              </div>
-            </div>
-
-            <div className="card-grid">
-              <div className="form-grid">
-                <label>
-                  Business Name
-                  <input defaultValue="Acme Tech" />
-                </label>
-                <label>
-                  Industry
-                  <input defaultValue="Marketing" />
-                </label>
-                <label className="full">
-                  Description
-                  <textarea
-                    rows={5}
-                    defaultValue="People under age 25 holding a degree in Computer Science and Engineering."
-                  />
-                </label>
-              </div>
-
-              <div>
-                <p className="format-title">Blog Format</p>
-                <div className="format-grid">
-                  {formats.map((format) => {
-                    const Icon = format.icon
-                    const selected = format.id === activeFormat
-
-                    return (
-                      <button
-                        type="button"
-                        key={format.id}
-                        className={`format-btn ${selected ? 'selected' : ''}`}
-                        onClick={() => setActiveFormat(format.id)}
-                      >
-                        <Icon size={16} />
-                        {format.label}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-            </div>
-
-            <div className="card-footer">
-              <button type="button" className="primary-btn">
-                Continue to Content
-              </button>
-            </div>
-          </motion.section>
-        </>
-      )
+  const navigateToNav = (item: NavItem) => {
+    if (item.id === 'growth') {
+      navigate({ pathname: item.path, search: `?tool=${activeTool}` })
+      return
     }
-
-    return (
-      <section className="module-stage" aria-label={`${selectedNav.label} view`}>
-        <div className="module-head">
-          <p className="eyebrow">Workspace Module</p>
-          <h2>{selectedNav.label}</h2>
-          <p className="muted">Live section preview with premium transitions and glass UI components.</p>
-        </div>
-        <div className="module-grid">
-          <article className="module-card">
-            <h3>Pipeline Health</h3>
-            <p className="muted">Track live conversion metrics and campaign effectiveness in one place.</p>
-            <button type="button" className="ghost-btn">
-              Open Dashboard
-            </button>
-          </article>
-          <article className="module-card">
-            <h3>AI Suggestions</h3>
-            <p className="muted">Get instant recommendations tailored to this module context.</p>
-            <button type="button" className="ghost-btn">
-              Generate Suggestions
-            </button>
-          </article>
-          <article className="module-card">
-            <h3>Team Activity</h3>
-            <p className="muted">Review recent actions, approvals, and content quality checkpoints.</p>
-            <button type="button" className="ghost-btn">
-              View Activity
-            </button>
-          </article>
-        </div>
-      </section>
-    )
+    navigate(item.path)
   }
 
   return (
     <div className="page-frame">
-      <header className="top-nav">
-        <div className="brand-tile">
-          <WandSparkles size={16} />
-        </div>
-
-        <nav className="top-nav-menu" aria-label="Main navigation">
-          {navItems.map((item) => {
-            const Icon = item.icon
-            return (
-              <button
-                type="button"
-                key={item.id}
-                className={`nav-link ${activeNav === item.id ? 'active' : ''}`}
-                onClick={() => setActiveNav(item.id)}
-              >
-                <Icon size={14} />
-                <span>{item.label}</span>
-              </button>
-            )
-          })}
-        </nav>
-
-        <div className="top-actions">
-          <button
-            type="button"
-            className="top-theme-btn"
-            onClick={toggleTheme}
-            aria-label="Toggle dark and light theme"
-          >
-            {theme === 'dark' ? <Sun size={15} /> : <MoonStar size={15} />}
-          </button>
-          <span className="powered-chip">Powered by Howdy Analytics</span>
-          <button type="button" className="profile-pill" aria-label="Admin profile">
-            <span className="profile-role">Admin</span>
-            <span className="avatar-btn">H</span>
-          </button>
-        </div>
-      </header>
+      <TopNav
+        navItems={navItems}
+        activeNav={activeNav}
+        onNavigate={navigateToNav}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
 
       <div className="app-shell">
         <div className="ambient-layer" aria-hidden="true">
@@ -356,49 +317,13 @@ function App() {
           <span className="orb orb-c" />
         </div>
 
-        <aside className="tool-rail">
-        <div className="rail-header">
-          <div className="rail-mark">
-            <WandSparkles size={18} />
-          </div>
-          <div>
-            <p className="eyebrow">Workspace</p>
-            <h1>GrowthHub</h1>
-          </div>
-        </div>
-
-        <div className="tool-list">
-          {tools.map((tool, index) => {
-            const Icon = tool.icon
-            const isActive = tool.id === activeTool
-
-            return (
-              <motion.button
-                key={tool.id}
-                type="button"
-                className={`tool-item ${isActive ? 'active' : ''}`}
-                onClick={() => setActiveTool(tool.id)}
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.32, delay: index * 0.05 }}
-              >
-                <span className="tool-icon">
-                  <Icon size={16} />
-                </span>
-                <span className="tool-copy">
-                  <span>{tool.name}</span>
-                  <small>{tool.subtitle}</small>
-                </span>
-              </motion.button>
-            )
-          })}
-        </div>
-
-        <div className="rail-tip">
-          <Target size={16} />
-          <p>Pick a tool first. The content wizard adapts automatically.</p>
-        </div>
-        </aside>
+        <ToolRail
+          toolQuery={toolQuery}
+          onToolQueryChange={setToolQuery}
+          filteredTools={filteredTools}
+          activeTool={activeTool}
+          onToolSelect={setActiveTool}
+        />
 
         <main
           className={`main-stage ${focusMode ? 'is-focusing' : ''}`}
@@ -414,7 +339,38 @@ function App() {
               exit={{ opacity: 0, y: -10, filter: 'blur(6px)' }}
               transition={{ duration: 0.3, ease: 'easeOut' }}
             >
-              {renderModuleStage()}
+              <Suspense fallback={<div className="route-loading">Loading workspace module...</div>}>
+                {activeNav === 'growth' ? (
+                  <GrowthPage
+                    title={`${selectedTool.name} Studio`}
+                    activeFormat={activeFormat}
+                    form={form}
+                    formats={formats}
+                    tones={tones}
+                    lengths={lengths}
+                    generatedContent={generatedContent}
+                    copied={copied}
+                    errorMessage={errorMessage}
+                    isGenerating={isGenerating}
+                    completionPercent={completionPercent}
+                    qualityScore={qualityScore}
+                    toolsMatched={filteredTools.length}
+                    savedLabel={savedLabel}
+                    onFormatChange={setActiveFormat}
+                    onFieldChange={handleFormValue}
+                    onGenerate={generateContent}
+                    onSaveDraft={saveDraft}
+                    onReset={resetWorkflow}
+                    onCopy={copyGeneratedContent}
+                    onDownload={downloadGeneratedContent}
+                    onFocus={() => setFocusMode(true)}
+                    onBlur={handleCardBlurCapture}
+                    focusMode={focusMode}
+                  />
+                ) : (
+                  <ModulePage title={selectedNav.label} module={moduleContent[activeNav]} />
+                )}
+              </Suspense>
             </motion.div>
           </AnimatePresence>
         </main>
